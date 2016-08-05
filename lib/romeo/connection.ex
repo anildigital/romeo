@@ -130,7 +130,7 @@ defmodule Romeo.Connection do
         {:noreply, conn}
       {:ok, conn, stanza} ->
         stanza = Romeo.Stanza.Parser.parse(stanza)
-        Kernel.send(owner, {:stanza, stanza})
+        Kernel.send(owner, {:stanza, stanza, self})
         {:noreply, conn}
       {:error, _} = error ->
         {:disconnect, error, conn}
