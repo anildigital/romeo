@@ -50,7 +50,7 @@ defmodule Romeo.Connection do
       opts
       |> Keyword.put_new(:timeout, @timeout)
       |> Keyword.put_new(:transport, @default_transport)
-      |> Keyword.put(:owner, self)
+      |> Keyword.put_new(:owner, self)
 
     Connection.start_link(__MODULE__, struct(__MODULE__, opts))
   end
