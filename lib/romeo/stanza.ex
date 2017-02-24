@@ -99,12 +99,18 @@ defmodule Romeo.Stanza do
       ])
   end
 
+  def handshake(hash) do
+    cdata = xmlcdata(content: hash)
+    xmlel(name: "handshake", children: [cdata])
+  end
+
   def auth(mechanism), do: auth(mechanism, [])
-  def auth(mechanism, body) do
+  def auth(mechanism, body, additional_attrs \\ []) do
     xmlel(name: "auth",
       attrs: [
         {"xmlns", ns_sasl},
         {"mechanism", mechanism}
+        | additional_attrs
       ],
       children: [body])
   end
@@ -149,6 +155,28 @@ defmodule Romeo.Stanza do
 
   def get_roster do
     iq("get", xmlel(name: "query", attrs: [{"xmlns", ns_roster}]))
+  end
+
+  def set_roster_item(jid, subscription \\ "both", name \\ "", group \\ "") do
+    name_to_set = case name do
+      "" -> Romeo.JID.parse(jid).user
+      _ -> name
+    end
+    group_xmlel = case group do
+      "" -> []
+      _ -> [xmlel(name: "group", children: [cdata(group)])]
+    end
+    iq("set", xmlel(
+      name: "query",
+      attrs: [{"xmlns", ns_roster}],
+      children: [
+        xmlel(name: "item", attrs: [
+          {"jid", jid},
+          {"subscription", subscription},
+          {"name", name_to_set}
+        ], children: group_xmlel)
+      ]
+    ))
   end
 
   def get_inband_register do
@@ -309,6 +337,6 @@ defmodule Romeo.Stanza do
   Generates a random hex string for use as an id for a stanza.
   """
   def id do
-    :crypto.rand_bytes(2) |> Base.encode16(case: :lower)
+    :crypto.strong_rand_bytes(2) |> Base.encode16(case: :lower)
   end
 end

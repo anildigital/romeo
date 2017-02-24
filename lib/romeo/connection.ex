@@ -6,9 +6,11 @@ defmodule Romeo.Connection do
 
   alias Romeo.Connection.Features
 
-  defstruct features: %Features{},
+  defstruct component: false,
+            features: %Features{},
             host: nil,
             jid: nil,
+            legacy_tls: false,
             nickname: "",
             owner: nil,
             parser: nil,
@@ -21,6 +23,7 @@ defmodule Romeo.Connection do
             ssl_opts: [],
             socket: nil,
             socket_opts: [],
+            stream_id: nil,
             timeout: nil,
             transport: nil
 
@@ -35,6 +38,7 @@ defmodule Romeo.Connection do
 
   ## Options
 
+    * `:component` - Connect as an [XMPP Component][0] (default: `false`);
     * `:host` - Server hostname (default: inferred by the JID);
     * `:jid` - User jabber ID;
     * `:password` - User password;
@@ -44,15 +48,17 @@ defmodule Romeo.Connection do
     * `:socket_opts` - Options to be given to the underlying socket;
     * `:timeout` - Connect timeout in milliseconds (default: `#{@timeout}`);
     * `:transport` - Transport handles the protocol (default: `#{@default_transport}`);
+
+  [0]: http://xmpp.org/extensions/xep-0114.html
   """
-  def start_link(opts) do
-    opts =
-      opts
+  def start_link(args, options \\ []) do
+    args =
+      args
       |> Keyword.put_new(:timeout, @timeout)
       |> Keyword.put_new(:transport, @default_transport)
       |> Keyword.put_new(:owner, self)
 
-    Connection.start_link(__MODULE__, struct(__MODULE__, opts))
+    Connection.start_link(__MODULE__, struct(__MODULE__, args), options)
   end
 
   @doc """
@@ -113,12 +119,15 @@ defmodule Romeo.Connection do
         {:disconnect, error, error, conn}
     end
   end
-  def handle_call(:close, from, conn) do
-    {:disconnect, {:close, from}, conn}
+  def handle_call(:close, from, %{socket: socket, transport: transport} = conn) do
+    transport.disconnect({:close, from}, socket)
+    {:reply, :ok, conn}
   end
 
   def handle_info(info, %{owner: owner, transport: transport} = conn) do
     case transport.handle_message(info, conn) do
+      {:ok, conn, :more} ->
+        {:noreply, conn}
       {:ok, conn, stanza} ->
         stanza = Romeo.Stanza.Parser.parse(stanza)
         Kernel.send(owner, {:stanza, stanza, self})
