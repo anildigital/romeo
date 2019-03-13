@@ -58,7 +58,7 @@ defmodule Romeo.Connection do
       |> Keyword.put_new(:transport, @default_transport)
       |> Keyword.put_new(:owner, self())
 
-    Connection.start_link(__MODULE__, struct(__MODULE__, args), options)
+    Connection.start_link(__MODULE__, {struct(__MODULE__, args), self()}, options)
   end
 
   @doc """
@@ -82,7 +82,11 @@ defmodule Romeo.Connection do
 
   ## Connection callbacks
 
-  def init(conn) do
+  def init({conn, caller}) do
+    if conn.owner != caller do
+      Process.monitor(conn.owner)
+    end
+
     {:connect, :init, conn}
   end
 
@@ -122,6 +126,10 @@ defmodule Romeo.Connection do
   def handle_call(:close, from, %{socket: socket, transport: transport} = conn) do
     transport.disconnect({:close, from}, socket)
     {:reply, :ok, conn}
+  end
+
+  def handle_info({:DOWN, _, :process, owner, reason}, %{owner: owner} = conn) do
+    {:disconnect, {:owner_down, reason}, conn}
   end
 
   def handle_info(info, %{owner: owner, transport: transport} = conn) do
