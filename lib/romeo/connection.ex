@@ -103,6 +103,10 @@ defmodule Romeo.Connection do
     transport.disconnect({:close, from}, socket)
     {:stop, {:shutdown, :closed}, conn}
   end
+  def disconnect({:owner_down, reason}, %{socket: socket, transport: transport} = conn) do
+    transport.disconnect({:owner_down, reason}, socket)
+    {:stop, {:shutdown, {:owner_down, reason}}, conn}
+  end
   def disconnect(info, %{socket: socket, transport: transport} = conn) do
     transport.disconnect(info, socket)
     {:connect, :reconnect, reset_connection(conn)}
