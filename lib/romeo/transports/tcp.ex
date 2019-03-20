@@ -4,6 +4,8 @@ defmodule Romeo.Transports.TCP do
   @default_port 5222
   @ssl_opts [reuse_sessions: true]
   @socket_opts [packet: :raw, mode: :binary, active: :once]
+  @ns_jabber_client Romeo.XMLNS.ns_jabber_client
+  @ns_component_accept Romeo.XMLNS.ns_component_accept
 
   @type state :: Romeo.Connection.t
 
@@ -17,7 +19,7 @@ defmodule Romeo.Transports.TCP do
   import Kernel, except: [send: 2]
 
   @spec connect(Keyword.t) :: {:ok, state} | {:error, any}
-  def connect(%Conn{host: host, port: port, socket_opts: socket_opts} = conn) do
+  def connect(%Conn{host: host, port: port, socket_opts: socket_opts, legacy_tls: tls} = conn) do
     host = (host || host(conn.jid)) |> to_char_list
     port = (port || @default_port)
 
@@ -27,7 +29,9 @@ defmodule Romeo.Transports.TCP do
       {:ok, socket} ->
         Logger.info fn -> "Established connection to #{host}" end
         parser = :fxml_stream.new(self(), :infinity, [:no_gen_server])
-        start_protocol(%{conn | parser: parser, socket: {:gen_tcp, socket}})
+        conn = %{conn | parser: parser, socket: {:gen_tcp, socket}}
+        conn = if tls, do: upgrade_to_tls(conn), else: conn
+        start_protocol(conn)
       {:error, _} = error ->
         error
     end
@@ -46,21 +50,31 @@ defmodule Romeo.Transports.TCP do
     end
   end
 
-  defp start_protocol(%Conn{} = conn) do
+  defp start_protocol(%Conn{component: true} = conn) do
     conn
-    |> start_stream
-    |> negotiate_features
-    |> maybe_start_tls
-    |> authenticate
-    |> bind
-    |> session
-    |> ready
+    |> start_stream(@ns_component_accept)
+    |> handshake()
+    |> ready()
   end
 
-  defp start_stream(%Conn{jid: jid} = conn) do
+  defp start_protocol(%Conn{} = conn) do
     conn
-    |> send(jid |> host |> Romeo.Stanza.start_stream)
-    |> recv(fn conn, xmlstreamstart() -> conn end)
+    |> start_stream(@ns_jabber_client)
+    |> negotiate_features()
+    |> maybe_start_tls()
+    |> authenticate()
+    |> bind()
+    |> session()
+    |> ready()
+  end
+
+  defp start_stream(%Conn{jid: jid} = conn, xmlns \\ @ns_jabber_client) do
+    conn
+    |> send(jid |> host |> Romeo.Stanza.start_stream(xmlns))
+    |> recv(fn conn, xmlstreamstart(attrs: attrs) ->
+      {"id", id} = List.keyfind(attrs, "id", 0)
+      %{conn | stream_id: id}
+    end)
   end
 
   defp negotiate_features(%Conn{} = conn) do
@@ -95,6 +109,10 @@ defmodule Romeo.Transports.TCP do
     |> reset_parser
     |> start_stream
     |> negotiate_features
+  end
+
+  defp handshake(%Conn{} = conn) do
+    Romeo.Auth.handshake!(conn)
   end
 
   defp bind(%Conn{owner: owner, resource: resource} = conn) do
@@ -145,26 +163,31 @@ defmodule Romeo.Transports.TCP do
     %{conn | parser: parser}
   end
 
-  defp parse_data(%Conn{jid: jid, owner: owner, parser: parser} = conn, data, send_to_owner \\ false) do
+  defp parse_data(%Conn{jid: jid, parser: parser} = conn, data) do
+    Logger.debug fn -> "[#{jid}][INCOMING] #{inspect data}" end
+
     parser = :fxml_stream.parse(parser, data)
 
     stanza =
-      receive do
-        {:xmlstreamstart, _, _} = stanza -> stanza
-        {:xmlstreamend, _} = stanza      -> stanza
-        {:xmlstreamraw, stanza}          -> stanza
-        {:xmlstreamcdata, stanza}        -> stanza
-        {:xmlstreamerror, _} = stanza    -> stanza
-        {:xmlstreamelement, stanza}      -> stanza
+      case receive_stanza() do
+        :more -> :more
+        stanza -> stanza
       end
 
-    Logger.debug fn -> "[#{jid}][INCOMING] #{inspect data}" end
-
-    if send_to_owner do
-      Kernel.send(owner, {:stanza, stanza})
-    end
-
     {:ok, %{conn | parser: parser}, stanza}
+  end
+
+  defp receive_stanza(timeout \\ 10) do
+    receive do
+      {:xmlstreamstart, _, _} = stanza -> stanza
+      {:xmlstreamend, _} = stanza      -> stanza
+      {:xmlstreamraw, stanza}          -> stanza
+      {:xmlstreamcdata, stanza}        -> stanza
+      {:xmlstreamerror, _} = stanza    -> stanza
+      {:xmlstreamelement, stanza}      -> stanza
+    after timeout ->
+      :more
+    end
   end
 
   def send(%Conn{jid: jid, socket: {mod, socket}} = conn, stanza) do
@@ -181,14 +204,18 @@ defmodule Romeo.Transports.TCP do
         fun.(conn, stanza)
       {:tcp, ^socket, data} ->
         :ok = activate({:gen_tcp, socket})
-        {:ok, conn, stanza} = parse_data(conn, data)
-        fun.(conn, stanza)
+        if whitespace_only?(data) do
+          conn
+        else
+          {:ok, conn, stanza} = parse_data(conn, data)
+          fun.(conn, stanza)
+        end
       {:tcp_closed, ^socket} ->
         {:error, :closed}
       {:tcp_error, ^socket, reason} ->
         {:error, reason}
     after timeout ->
-      Kernel.send(self, {:error, :timeout})
+      Kernel.send(self(), {:error, :timeout})
       conn
     end
   end
@@ -196,22 +223,33 @@ defmodule Romeo.Transports.TCP do
     receive do
       {:xmlstreamelement, stanza} ->
         fun.(conn, stanza)
+      {:ssl, ^socket, " "} ->
+        :ok = activate({:ssl, socket})
+        conn
       {:ssl, ^socket, data} ->
         :ok = activate({:ssl, socket})
-        {:ok, conn, stanza} = parse_data(conn, data)
-        fun.(conn, stanza)
+
+        if whitespace_only?(data) do
+          conn
+        else
+          {:ok, conn, stanza} = parse_data(conn, data)
+          fun.(conn, stanza)
+        end
       {:ssl_closed, ^socket} ->
         {:error, :closed}
       {:ssl_error, ^socket, reason} ->
         {:error, reason}
     after timeout ->
-      Kernel.send(self, {:error, :timeout})
+      Kernel.send(self(), {:error, :timeout})
       conn
     end
   end
 
   def handle_message({:tcp, socket, data}, %{socket: {:gen_tcp, socket}} = conn) do
     {:ok, _, _} = handle_data(data, conn)
+  end
+  def handle_message({:xmlstreamelement, stanza}, conn) do
+    {:ok, conn, stanza}
   end
   def handle_message({:tcp_closed, socket}, %{socket: {:gen_tcp, socket}}) do
     {:error, :closed}
@@ -232,18 +270,20 @@ defmodule Romeo.Transports.TCP do
 
   defp handle_data(data, %{socket: socket} = conn) do
     :ok = activate(socket)
-    {:ok, _conn, _stanza} = parse_data(conn, data, false)
+    {:ok, _conn, _stanza} = parse_data(conn, data)
   end
+
+  defp whitespace_only?(data), do: Regex.match?(~r/^\s+$/, data)
 
   defp activate({:gen_tcp, socket}) do
     case :inet.setopts(socket, [active: :once]) do
       :ok ->
         :ok
       {:error, :closed} ->
-        _ = Kernel.send(self, {:tcp_closed, socket})
+        _ = Kernel.send(self(), {:tcp_closed, socket})
         :ok
       {:error, reason} ->
-        _ = Kernel.send(self, {:tcp_error, socket, reason})
+        _ = Kernel.send(self(), {:tcp_error, socket, reason})
         :ok
     end
   end
@@ -252,10 +292,10 @@ defmodule Romeo.Transports.TCP do
       :ok ->
         :ok
       {:error, :closed} ->
-        _ = Kernel.send(self, {:ssl_closed, socket})
+        _ = Kernel.send(self(), {:ssl_closed, socket})
         :ok
       {:error, reason} ->
-        _ = Kernel.send(self, {:ssl_error, socket, reason})
+        _ = Kernel.send(self(), {:ssl_error, socket, reason})
         :ok
     end
   end
