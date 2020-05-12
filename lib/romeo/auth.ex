@@ -42,7 +42,8 @@ defmodule Romeo.Auth do
     |> mod.recv(fn
       conn, xmlel(name: "handshake") ->
         conn
-      _conn, xmlel(name: "stream:error") ->
+      _conn, xmlel(name: "stream:error") = reply ->
+        Logger.error fn -> "Handshake Error: #{inspect(reply)}" end
         raise Romeo.Auth.Error, "handshake error"
     end)
   end
@@ -88,12 +89,13 @@ defmodule Romeo.Auth do
   end
 
   defp success?(%{transport: mod} = conn) do
-    mod.recv(conn, fn conn, xmlel(name: name) ->
+    mod.recv(conn, fn conn, xmlel(name: name) = reply ->
       case name do
         "success" ->
           Logger.info fn -> "Authenticated successfully" end
           {:ok, conn}
         "failure" ->
+          Logger.error fn -> "Failed to authenticate: #{inspect(reply)}" end
           {:error, conn}
       end
     end)
